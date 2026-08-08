@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Personal/local data — never publish real chat history or IDE config
+qa_pairs.json
+.claude/
+
+# Logs, backups, local artifacts
+*.bak
+*.log
+.DS_Store
+
+# Virtual environments / secrets
+venv/
+.venv/
+.env
