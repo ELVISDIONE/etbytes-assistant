@@ -2,6 +2,7 @@
 """
 E.TBYTES Assistant – Full Web Dashboard
 All CLI features now in your browser.
+Author: ELVISDIONE (E.TBYTES) <elvisteddy269@gmail.com>
 """
 import os, sys, json, base64, io, re, time, random, shutil, threading, subprocess, secrets
 from datetime import datetime
@@ -26,6 +27,9 @@ try:
         ChatServer,
         get_lan_ip,
         ai_generate_quiz,
+        check_for_updates,
+        apply_update,
+        APP_VERSION,
         # additional pure functions (we’ll use them directly)
     )
 except ImportError:
@@ -650,6 +654,9 @@ button:hover, .card button:hover {
   <a href="#" data-nav="deps" onclick="navigate('deps')">🔍 Dependency Scanner</a>
   <a href="#" data-nav="logs" onclick="navigate('logs')">📜 View Logs</a>
   <a href="#" data-nav="settings" onclick="navigate('settings')">⚙️ Settings</a>
+  <div class="drawer-footer" style="margin-top:auto;padding:1rem;font-size:0.72rem;opacity:0.55;line-height:1.4;">
+    Made by ELVISDIONE (E.TBYTES)<br>elvisteddy269@gmail.com
+  </div>
 </nav>
 
 <!-- Main Content -->
@@ -925,6 +932,14 @@ button:hover, .card button:hover {
       <label style="display:block;margin-top:0.4rem"><input type="checkbox" id="set-offline"> Offline mode</label>
       <label style="display:block;margin-top:0.4rem"><input type="checkbox" id="set-learning"> Learning enabled</label>
       <button style="margin-top:0.8rem" onclick="saveSettings()">Save Settings</button>
+    </div>
+    <div class="card">
+      <h3>Software Update</h3>
+      <div id="update-version" style="opacity:0.7;font-size:0.85rem;margin-bottom:0.6rem"></div>
+      <button onclick="checkForUpdate()">Check for Updates</button>
+      <div id="update-status" style="margin-top:0.6rem;font-size:0.85rem;white-space:pre-wrap"></div>
+      <button id="update-install-btn" style="display:none;margin-top:0.6rem" onclick="applyUpdateNow()">Install Update</button>
+      <button id="update-restart-btn" style="display:none;margin-top:0.6rem" onclick="restartDashboardNow()">Restart Dashboard</button>
     </div>
   </div>
 </div>
@@ -1843,6 +1858,7 @@ async function loadSettings() {
   document.getElementById('set-git-commit').checked = !!resp.auto_git_commit;
   document.getElementById('set-offline').checked = !!resp.offline_enabled;
   document.getElementById('set-learning').checked = !!resp.learning_enabled;
+  document.getElementById('update-version').textContent = 'Current version: ' + (resp.app_version || '?');
 }
 async function changePassword() {
   const pwd = document.getElementById('new-password').value;
@@ -1867,6 +1883,43 @@ async function saveSettings() {
     learning_enabled: document.getElementById('set-learning').checked,
   });
   alert('Settings saved!');
+}
+
+// ── Software Update ──
+let _pendingUpdateBehind = 0;
+async function checkForUpdate() {
+  const statusEl = document.getElementById('update-status');
+  const installBtn = document.getElementById('update-install-btn');
+  statusEl.textContent = 'Checking...';
+  installBtn.style.display = 'none';
+  const resp = await api('/api/check_update', 'GET');
+  document.getElementById('update-version').textContent = 'Current version: ' + (resp.version || '?');
+  if (resp.error) {
+    statusEl.textContent = resp.error;
+  } else if (resp.available) {
+    _pendingUpdateBehind = resp.behind;
+    statusEl.textContent = resp.behind + ' new commit(s) available:\n' + (resp.log || '');
+    installBtn.style.display = 'inline-block';
+  } else {
+    statusEl.textContent = "You're already on the latest version.";
+  }
+}
+async function applyUpdateNow() {
+  const statusEl = document.getElementById('update-status');
+  document.getElementById('update-install-btn').style.display = 'none';
+  statusEl.textContent = 'Installing update...';
+  const resp = await api('/api/apply_update', 'POST', {});
+  if (resp.success) {
+    statusEl.textContent = resp.message + '\nRestart the dashboard to use the new version.';
+    document.getElementById('update-restart-btn').style.display = 'inline-block';
+  } else {
+    statusEl.textContent = 'Update failed: ' + (resp.error || 'unknown error');
+  }
+}
+async function restartDashboardNow() {
+  const statusEl = document.getElementById('update-status');
+  statusEl.textContent = 'Restarting dashboard... reload this page in a few seconds.';
+  await api('/api/restart_dashboard', 'POST', {});
 }
 
 // ── ASCII Art ──
@@ -2086,6 +2139,7 @@ def get_config():
         personality=assistant_config.get('personality', ''),
         offline_enabled=assistant_config.get('offline_enabled', False),
         learning_enabled=assistant_config.get('learning_enabled', True),
+        app_version=APP_VERSION,
     )
 
 @app.route('/api/update_settings', methods=['POST'])
@@ -2105,6 +2159,34 @@ def update_api_key():
     if not session.get('auth'): return jsonify(error='Unauthorized'), 401
     assistant_config['groq_api_key'] = request.json['api_key']
     save_config(assistant_config)
+    return jsonify(success=True)
+
+@app.route('/api/check_update')
+def api_check_update():
+    if not session.get('auth'): return jsonify(error='Unauthorized'), 401
+    result = check_for_updates(silent=True)
+    if result is None:
+        return jsonify(available=False, version=APP_VERSION,
+                        error="Update check unavailable (not a git checkout, git missing, or no network).")
+    has_update, behind, log_text = result
+    return jsonify(available=has_update, behind=behind, log=log_text, version=APP_VERSION)
+
+@app.route('/api/apply_update', methods=['POST'])
+def api_apply_update():
+    if not session.get('auth'): return jsonify(error='Unauthorized'), 401
+    result = check_for_updates(silent=True)
+    if not result or not result[0]:
+        return jsonify(success=False, error="No update available.")
+    success, message = apply_update(result[1])
+    return jsonify(success=success, message=message)
+
+@app.route('/api/restart_dashboard', methods=['POST'])
+def api_restart_dashboard():
+    if not session.get('auth'): return jsonify(error='Unauthorized'), 401
+    def _delayed_restart():
+        time.sleep(0.5)  # let the HTTP response above flush to the client first
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(target=_delayed_restart, daemon=True).start()
     return jsonify(success=True)
 
 @app.route('/api/chat', methods=['POST'])

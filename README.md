@@ -29,24 +29,23 @@ Chat, play games, browse files, generate images/PDFs/QR codes, solve math, get n
 
 ## 🚀 Quick Start
 
-### 1. Install (Termux)
+### 1. Clone it
 
 ```bash
-pkg update && pkg install python git
+pkg update && pkg install git
 git clone https://github.com/ELVISDIONE/etbytes-assistant.git
 cd etbytes-assistant
-pip install -r requirements.txt
 ```
 
 > Works outside Termux too (any Linux/macOS with Python 3.9+) — a handful of niceties (TTS, clipboard, notifications) are Termux-specific and simply no-op elsewhere.
 
-### 2. Run it
+### 2. Run the setup script
 
 ```bash
-python etbytes_assistant.py
+./setup.sh
 ```
 
-First run drops you straight into a **setup wizard**:
+This is the **first thing you should run** — not `etbytes_assistant.py` directly. It installs the required Termux packages (on Termux), installs the Python dependencies from `requirements.txt`, and then automatically launches the assistant for you, dropping you straight into a **setup wizard**:
 
 ```
 🤖 Welcome to E.TBYTES Assistant
@@ -99,10 +98,21 @@ A random login password is generated the first time the dashboard starts (printe
 ## 🛠️ CLI reference
 
 ```bash
-python etbytes_assistant.py            # normal interactive CLI
+./setup.sh                             # first-time install: deps + launch (run this once)
+python etbytes_assistant.py            # normal interactive CLI (after setup)
 python etbytes_assistant.py --web      # web dashboard only, runs in the foreground
 python etbytes_assistant.py --setup    # re-run the setup wizard at any time
+python etbytes_assistant.py --update   # check for and install updates, then exit
 ```
+
+## 🔄 Updating
+
+Since this is a git clone, staying current is a `git pull` away — but you don't have to run it by hand:
+
+- **CLI**: menu option **21. ⬆️ Update Assistant**, or `python etbytes_assistant.py --update`. The CLI also checks for updates silently in the background on startup and flags it in the menu if one's available.
+- **Web Dashboard**: Settings → **Software Update** → *Check for Updates* → *Install Update* → *Restart Dashboard*.
+
+Either path does a `git pull --ff-only` in place, reinstalls `requirements.txt` if it changed, and restarts into the new version. Local uncommitted changes are stashed first and restored after, so a hand-edited config file won't block the pull. Requires the folder to still be a git checkout (don't delete the `.git` directory) and network access to the repo's remote.
 
 ## ⚙️ Configuration
 
@@ -116,6 +126,7 @@ All settings live in `~/.etbytes_config.json` (created on first run, never track
 | `personality` | System prompt / behavior instructions for the AI |
 | `offline_enabled` | Use local learned Q&A matching when there's no internet |
 | `web_autostart` | Launch the web dashboard automatically every time you start the CLI |
+| `check_updates_on_startup` | Silently check for new commits when the CLI starts (default: on) |
 
 Everything here can also be changed from the in-app **Settings** menu — no need to hand-edit the file.
 
@@ -130,6 +141,10 @@ Core dependencies are installed via `requirements.txt`. A few features are optio
 ## 🤝 Contributing
 
 Issues and PRs are welcome — fork it, branch it, send a pull request.
+
+## 👤 Author
+
+Made by **ELVISDIONE** (E.TBYTES) — [elvisteddy269@gmail.com](mailto:elvisteddy269@gmail.com)
 
 ## 📄 License
 

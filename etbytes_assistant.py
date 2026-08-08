@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 E.TBYTES Assistant - Advanced AI for Termux
-Author: Elvis (E.TBYTES)
+Author: ELVISDIONE (E.TBYTES) <elvisteddy269@gmail.com>
 Version: 2.0 (Fixed & Upgraded)
 """
 
@@ -91,6 +91,8 @@ TASKS_FILE = os.path.expanduser("~/.etbytes_tasks.json")
 USER_STORAGE = os.path.expanduser("~/storage/shared")
 DOWNLOADS_DIR = os.path.expanduser("~/storage/downloads")
 
+APP_VERSION = "2.0.0"
+
 WEB_APP_PATH = os.path.join(SCRIPT_DIR, "web_app.py")
 WEB_PID_FILE = os.path.expanduser("~/.etbytes_web.pid")
 WEB_LOG_FILE = os.path.expanduser("~/.etbytes_web.log")
@@ -118,6 +120,7 @@ default_config = {
     "learning_enabled": True,
     "log_enabled": True,
     "web_autostart": False,             # Auto-launch the web dashboard on every CLI start
+    "check_updates_on_startup": True,   # Silently check for new commits when the CLI starts
     "_setup_complete": False,           # Flips to True once the first-run wizard finishes
 }
 
@@ -145,6 +148,8 @@ def log_activity(action: str, details: str = ""):
         f.write(f"[{timestamp}] {action}: {sanitized}\n")
 
 # ---------- First-run Setup Wizard ----------
+DEFAULT_NAME_OPTIONS = ["Master", "Coder", "Eng", "Boss", "Champ", "Chief"]
+
 def setup_wizard():
     """Interactive onboarding: asks for a name, Groq API key, and a couple of
     preferences, then saves them to CONFIG_FILE. Only ever called from the
@@ -154,10 +159,11 @@ def setup_wizard():
     console.print(Panel(
         "[bold magenta]🤖 Welcome to E.TBYTES Assistant[/bold magenta]\n"
         "[dim]Let's get you set up — this only takes a minute.[/dim]",
-        border_style="magenta"
+        border_style="magenta",
+        subtitle="[dim]Made by ELVISDIONE (E.TBYTES) · elvisteddy269@gmail.com[/dim]"
     ))
 
-    name = Prompt.ask("What should I call you?", default=config.get("user_name") or "Friend")
+    name = Prompt.ask("What should I call you?", default=config.get("user_name") or random.choice(DEFAULT_NAME_OPTIONS))
     config["user_name"] = name
 
     console.print(
@@ -426,6 +432,119 @@ def git_auto_commit():
         log_activity("Git", "Auto-commit performed")
     except:
         pass
+
+# ---------- Self-Update ----------
+# Tracks whether a background startup check found new commits, so main_menu()
+# can flag it without blocking on the network on every redraw.
+_update_status = {"checked": False, "available": False, "behind": 0}
+
+def check_for_updates(silent=False):
+    """Compare the local checkout against its upstream branch.
+    Returns (has_update: bool, behind: int, log_text: str) on success, or None
+    if the check couldn't be performed (no git, not a repo, no network, etc.)."""
+    if not shutil.which("git"):
+        if not silent:
+            console.print("[yellow]git is not installed — can't check for updates.[/yellow]")
+        return None
+    if not os.path.isdir(os.path.join(SCRIPT_DIR, ".git")):
+        if not silent:
+            console.print("[yellow]This isn't a git checkout, so it can't self-update. "
+                           "Re-clone from GitHub to get the latest version.[/yellow]")
+        return None
+    try:
+        subprocess.run(["git", "-C", SCRIPT_DIR, "fetch", "--quiet"],
+                        check=True, capture_output=True, timeout=20)
+        local = subprocess.run(["git", "-C", SCRIPT_DIR, "rev-parse", "@"],
+                                check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+        remote = subprocess.run(["git", "-C", SCRIPT_DIR, "rev-parse", "@{u}"],
+                                 check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+        if local == remote:
+            return False, 0, ""
+        behind = subprocess.run(["git", "-C", SCRIPT_DIR, "rev-list", "--count", f"{local}..{remote}"],
+                                 check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+        log_text = subprocess.run(["git", "-C", SCRIPT_DIR, "log", "--oneline", f"{local}..{remote}"],
+                                   check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+        return True, int(behind or 0), log_text
+    except Exception as e:
+        if not silent:
+            console.print(f"[red]Update check failed: {e}[/red]")
+        log_activity("Update Check Error", str(e))
+        return None
+
+def _background_update_check():
+    """Runs once at CLI startup on a daemon thread; never blocks the menu."""
+    if not config.get("check_updates_on_startup", True):
+        return
+    result = check_for_updates(silent=True)
+    _update_status["checked"] = True
+    if result and result[0]:
+        _update_status["available"] = True
+        _update_status["behind"] = result[1]
+
+def apply_update(behind):
+    """Pull already-fetched upstream commits and refresh dependencies. Pure/non-interactive
+    (no console output, no prompts) so it can be reused by both the CLI and the web dashboard.
+    Returns (success: bool, message: str)."""
+    # Stash local edits (e.g. a hand-tweaked file) so a dirty checkout doesn't block the pull.
+    status = subprocess.run(["git", "-C", SCRIPT_DIR, "status", "--porcelain"],
+                             capture_output=True, text=True).stdout.strip()
+    stashed = False
+    if status:
+        subprocess.run(["git", "-C", SCRIPT_DIR, "stash", "push", "-u", "-m", "etbytes-auto-update"],
+                        check=True, capture_output=True)
+        stashed = True
+
+    try:
+        subprocess.run(["git", "-C", SCRIPT_DIR, "pull", "--ff-only"], check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        log_activity("Update Error", str(e))
+        if stashed:
+            subprocess.run(["git", "-C", SCRIPT_DIR, "stash", "pop"], check=False)
+        return False, f"Update failed: {e.stderr.decode(errors='replace') if e.stderr else e}"
+
+    restore_note = ""
+    if stashed:
+        try:
+            subprocess.run(["git", "-C", SCRIPT_DIR, "stash", "pop"], check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            restore_note = (" Your local changes were stashed but couldn't be reapplied "
+                             "automatically (conflict) — run 'git stash pop' manually to recover them.")
+
+    req_file = os.path.join(SCRIPT_DIR, "requirements.txt")
+    if os.path.exists(req_file):
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req_file], check=False)
+
+    _update_status["available"] = False
+    log_activity("Update", f"Pulled {behind} commit(s)")
+    return True, f"Updated — pulled {behind} commit(s).{restore_note}"
+
+def update_assistant():
+    """Interactive CLI flow: check, confirm, apply, and offer to restart into the new version."""
+    console.print("[cyan]Checking for updates...[/cyan]")
+    result = check_for_updates()
+    if result is None:
+        return
+    has_update, behind, log_text = result
+    if not has_update:
+        console.print("[green]You're already on the latest version.[/green]")
+        return
+
+    console.print(Panel(f"[bold yellow]{behind} new commit(s) available:[/bold yellow]\n{log_text}",
+                         border_style="yellow"))
+    if not Confirm.ask("Pull and install the update now?", default=True):
+        console.print("[dim]Update skipped.[/dim]")
+        return
+
+    console.print("[cyan]Applying update...[/cyan]")
+    success, message = apply_update(behind)
+    if not success:
+        console.print(f"[red]{message}[/red]")
+        return
+
+    console.print(Panel(f"[bold green]{message}\nRestart E.TBYTES Assistant to use the new version.[/bold green]",
+                         border_style="green"))
+    if Confirm.ask("Restart now?", default=True):
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
 
 # ---------- Dependency Scanner ----------
 def scan_dependencies():
@@ -1762,6 +1881,7 @@ def settings_menu():
             f"11. Toggle Offline Mode ({'ON' if config.get('offline_enabled', False) else 'OFF'})",
             f"12. Toggle Learning ({'ON' if config.get('learning_enabled', True) else 'OFF'})",
             f"13. Toggle Web Dashboard Autostart ({'ON' if config.get('web_autostart', False) else 'OFF'})",
+            f"14. Toggle Check Updates on Startup ({'ON' if config.get('check_updates_on_startup', True) else 'OFF'})",
         ]
 
         for i in range(0, len(items), 2):
@@ -1772,7 +1892,7 @@ def settings_menu():
         console.print(settings_table)
         console.print("0. Back")
 
-        choice = Prompt.ask("Choice", choices=[str(i) for i in range(0,14)], default="0")
+        choice = Prompt.ask("Choice", choices=[str(i) for i in range(0,15)], default="0")
         if choice == "0":
             break
         elif choice == "1":
@@ -1836,6 +1956,10 @@ def settings_menu():
             config["web_autostart"] = not config.get("web_autostart", False)
             save_config(config)
             console.print(f"[green]Web dashboard autostart {'enabled' if config['web_autostart'] else 'disabled'}.[/green]")
+        elif choice == "14":
+            config["check_updates_on_startup"] = not config.get("check_updates_on_startup", True)
+            save_config(config)
+            console.print(f"[green]Startup update checks {'enabled' if config['check_updates_on_startup'] else 'disabled'}.[/green]")
 def interactive_fiction():
     console.print("[bold]🎮 Interactive Fiction (AI Dungeon Master)[/bold]")
     console.print("You are in a mysterious world. Type actions, and the AI will continue the story.")
@@ -2260,9 +2384,16 @@ def main_menu():
     if config["auto_git_commit"]:
         scheduler.add_job(git_auto_commit, 3600)
 
+    # Non-blocking check for a newer version of the assistant itself
+    threading.Thread(target=_background_update_check, daemon=True).start()
+
     while True:
         console.clear()
-        console.print(Panel("[bold magenta]🤖 E.TBYTES ASSISTANT v2.0[/bold magenta]", subtitle="Advanced AI for Termux"))
+        console.print(Panel(f"[bold magenta]🤖 E.TBYTES ASSISTANT v{APP_VERSION}[/bold magenta]", subtitle="Advanced AI for Termux"))
+        console.print("[dim]Made by ELVISDIONE (E.TBYTES) · elvisteddy269@gmail.com[/dim]", justify="center")
+        if _update_status["available"]:
+            console.print(f"[yellow]🔔 {_update_status['behind']} update(s) available — choose option 21 to update.[/yellow]",
+                           justify="center")
         menu_table = Table(show_header=False, box=None, show_edge=False, padding=(0, 1))
         menu_table.add_column(style="cyan", justify="left")
         menu_table.add_column(style="cyan", justify="left")
@@ -2276,9 +2407,9 @@ def main_menu():
         menu_table.add_row("15. 🌍 Language Learning", "16. ⚙️ Settings")
         menu_table.add_row("17. 📜 View Logs", "18.  🎲 Interactive Fiction (RPG)")
         menu_table.add_row("19.  🎨 ASCII Art Generator", "20. 🌐 Web Dashboard")
-        menu_table.add_row("0.  🚪 Exit", "")
+        menu_table.add_row("21. ⬆️  Update Assistant", "0.  🚪 Exit")
         console.print(menu_table)
-        choice = Prompt.ask("Select option", choices=[str(i) for i in range(0,21)], default="0")
+        choice = Prompt.ask("Select option", choices=[str(i) for i in range(0,22)], default="0")
         if choice == "0":
             if watcher:
                 watcher.stop()
@@ -2319,13 +2450,20 @@ def main_menu():
                     stop_web_dashboard()
             else:
                 start_web_dashboard()
+        elif choice == "21":
+            update_assistant()
         Prompt.ask("\nPress Enter to continue")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="E.TBYTES Assistant")
     parser.add_argument("--web", action="store_true", help="Launch only the web dashboard (foreground)")
     parser.add_argument("--setup", action="store_true", help="Re-run the first-run setup wizard")
+    parser.add_argument("--update", action="store_true", help="Check for and install updates, then exit")
     args = parser.parse_args()
+
+    if args.update:
+        update_assistant()
+        sys.exit(0)
 
     if args.setup or not config.get("_setup_complete"):
         setup_wizard()
