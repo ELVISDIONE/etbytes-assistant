@@ -1730,8 +1730,19 @@ async function socketChatDoStop() {
 async function startDownload() {
   const url = document.getElementById('dl-url').value;
   const type = document.getElementById('dl-type').value;
-  const data = await api('/api/download', 'POST', {url, type:parseInt(type)});
-  document.getElementById('dl-status').innerText = data.message || 'Done';
+  document.getElementById('dl-status').innerText = 'Working...';
+  const resp = await fetch('/api/download', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url, type:parseInt(type)})
+  });
+  if (resp.headers.get('content-type')?.includes('application/zip')) {
+    const blob = await resp.blob();
+    const blobUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = blobUrl; a.download = 'downloaded_files.zip'; a.click();
+    document.getElementById('dl-status').innerText = 'Downloaded.';
+    return;
+  }
+  const data = await resp.json();
+  document.getElementById('dl-status').innerText = data.message || data.error || 'Done';
 }
 
 // ── Generate ──
@@ -2251,10 +2262,34 @@ def download():
                     links.append(full)
         if not links:
             return jsonify(message="No matching files found.")
-        # For types 6-8, return the list as text; for others return count
+        # For types 6-8, return the list as text; for others zip and download the files
         if dtype in [6,7,8]:
             return jsonify(message=f"Found {len(links)} links.", urls=links[:50])
-        return jsonify(message=f"Found {len(links)} files. Download not implemented yet.")
+
+        import zipfile
+        zip_buf = io.BytesIO()
+        saved = 0
+        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            used_names = set()
+            for link in links[:100]:
+                fname = os.path.basename(link.split('?')[0]) or f"file_{saved}"
+                base_name = fname
+                n = 1
+                while fname in used_names:
+                    root, ext = os.path.splitext(base_name)
+                    fname = f"{root}_{n}{ext}"
+                    n += 1
+                used_names.add(fname)
+                try:
+                    r = req.get(link, timeout=30)
+                    zf.writestr(fname, r.content)
+                    saved += 1
+                except Exception:
+                    continue
+        if saved == 0:
+            return jsonify(message=f"Found {len(links)} files but couldn't download any of them.")
+        zip_buf.seek(0)
+        return send_file(zip_buf, mimetype='application/zip', as_attachment=True, download_name='downloaded_files.zip')
     except Exception as e:
         return jsonify(error=str(e))
 
